@@ -68,6 +68,7 @@ impl<T: Timestamp> CapabilityTrait<T> for Capability<T> {
     fn time(&self) -> &T { &self.time }
     fn valid_for_output(&self, query_buffer: &Rc<RefCell<ChangeBatch<T>>>) -> bool {
         println!("    3");
+        println!(" {:?}  ==  {:?}", self.internal, query_buffer); 
         Rc::ptr_eq(&self.internal, query_buffer)
     }
 }
