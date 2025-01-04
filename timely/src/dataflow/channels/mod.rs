@@ -1,7 +1,6 @@
 //! Structured communication between timely dataflow operators.
 
 use crate::communication::Push;
-use crate::Container;
 
 /// A collection of types that may be pushed at.
 pub mod pushers;
@@ -11,10 +10,7 @@ pub mod pullers;
 pub mod pact;
 
 /// The input to and output from timely dataflow communication channels.
-pub type BundleCore<T, D> = crate::communication::Message<Message<T, D>>;
-
-/// The input to and output from timely dataflow communication channels specialized to vectors.
-pub type Bundle<T, D> = BundleCore<T, Vec<D>>;
+pub type Bundle<T, D> = crate::communication::Message<Message<T, D>>;
 
 /// A serializable representation of timestamped data.
 #[derive(Clone, Abomonation, Serialize, Deserialize)]
@@ -22,7 +18,7 @@ pub struct Message<T, D> {
     /// The timestamp associated with the message.
     pub time: T,
     /// The data in the message.
-    pub data: D,
+    pub data: Vec<D>,
     /// The source worker.
     pub from: usize,
     /// A sequence number for this worker-to-worker stream.
@@ -31,26 +27,22 @@ pub struct Message<T, D> {
 
 impl<T, D> Message<T, D> {
     /// Default buffer size.
-    #[deprecated = "Use timely::buffer::default_capacity instead"]
     pub fn default_length() -> usize {
-        crate::container::buffer::default_capacity::<D>()
+        1024
     }
-}
 
-impl<T, D: Container> Message<T, D> {
     /// Creates a new message instance from arguments.
-    pub fn new(time: T, data: D, from: usize, seq: usize) -> Self {
+    pub fn new(time: T, data: Vec<D>, from: usize, seq: usize) -> Self {
         Message { time, data, from, seq }
     }
 
-    /// Forms a message, and pushes contents at `pusher`. Replaces `buffer` with what the pusher
-    /// leaves in place, or the container's default element.
+    /// Forms a message, and pushes contents at `pusher`.
     #[inline]
-    pub fn push_at<P: Push<BundleCore<T, D>>>(buffer: &mut D, time: T, pusher: &mut P) {
+    pub fn push_at<P: Push<Bundle<T, D>>>(buffer: &mut Vec<D>, time: T, pusher: &mut P) {
 
-        let data = ::std::mem::take(buffer);
+        let data = ::std::mem::replace(buffer, Vec::new());
         let message = Message::new(time, data, 0, 0);
-        let mut bundle = Some(BundleCore::from_typed(message));
+        let mut bundle = Some(Bundle::from_typed(message));
 
         pusher.push(&mut bundle);
 
@@ -60,5 +52,9 @@ impl<T, D: Container> Message<T, D> {
                 buffer.clear();
             }
         }
-    }
-}
+
+        // TODO: Unclear we always want this here.
+        if buffer.capacity() != Self::default_length() {
+            *buffer = Vec::with_capacity(Self::default_length());
+        }
+    }}

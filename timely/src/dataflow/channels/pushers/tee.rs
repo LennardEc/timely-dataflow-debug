@@ -1,32 +1,26 @@
 //! A `Push` implementor with a list of `Box<Push>` to forward pushes to.
 
-use std::cell::RefCell;
-use std::fmt::{self, Debug};
 use std::rc::Rc;
+use std::cell::RefCell;
 
-use crate::dataflow::channels::{BundleCore, Message};
+use crate::Data;
+use crate::dataflow::channels::{Bundle, Message};
 
 use crate::communication::Push;
-use crate::{Container, Data};
-
-type PushList<T, D> = Rc<RefCell<Vec<Box<dyn Push<BundleCore<T, D>>>>>>;
 
 /// Wraps a shared list of `Box<Push>` to forward pushes to. Owned by `Stream`.
-pub struct TeeCore<T, D> {
-    buffer: D,
-    shared: PushList<T, D>,
+pub struct Tee<T: 'static, D: 'static> {
+    buffer: Vec<D>,
+    shared: Rc<RefCell<Vec<Box<dyn Push<Bundle<T, D>>>>>>,
 }
 
-/// [TeeCore] specialized to `Vec`-based container.
-pub type Tee<T, D> = TeeCore<T, Vec<D>>;
-
-impl<T: Data, D: Container> Push<BundleCore<T, D>> for TeeCore<T, D> {
+impl<T: Data, D: Data> Push<Bundle<T, D>> for Tee<T, D> {
     #[inline]
-    fn push(&mut self, message: &mut Option<BundleCore<T, D>>) {
+    fn push(&mut self, message: &mut Option<Bundle<T, D>>) {
         let mut pushers = self.shared.borrow_mut();
         if let Some(message) = message {
             for index in 1..pushers.len() {
-                self.buffer.clone_from(&message.data);
+                self.buffer.extend_from_slice(&message.data);
                 Message::push_at(&mut self.buffer, message.time.clone(), &mut pushers[index-1]);
             }
         }
@@ -42,12 +36,12 @@ impl<T: Data, D: Container> Push<BundleCore<T, D>> for TeeCore<T, D> {
     }
 }
 
-impl<T, D: Container> TeeCore<T, D> {
+impl<T, D> Tee<T, D> {
     /// Allocates a new pair of `Tee` and `TeeHelper`.
-    pub fn new() -> (TeeCore<T, D>, TeeHelper<T, D>) {
+    pub fn new() -> (Tee<T, D>, TeeHelper<T, D>) {
         let shared = Rc::new(RefCell::new(Vec::new()));
-        let port = TeeCore {
-            buffer: Default::default(),
+        let port = Tee {
+            buffer: Vec::with_capacity(Message::<T, D>::default_length()),
             shared: shared.clone(),
         };
 
@@ -55,41 +49,23 @@ impl<T, D: Container> TeeCore<T, D> {
     }
 }
 
-impl<T, D: Container> Clone for TeeCore<T, D> {
-    fn clone(&self) -> Self {
-        Self {
-            buffer: Default::default(),
+impl<T, D> Clone for Tee<T, D> {
+    fn clone(&self) -> Tee<T, D> {
+        Tee {
+            buffer: Vec::with_capacity(self.buffer.capacity()),
             shared: self.shared.clone(),
         }
     }
 }
 
-impl<T, D> Debug for TeeCore<T, D>
-where
-    D: Debug,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut debug = f.debug_struct("Tee");
-        debug.field("buffer", &self.buffer);
-
-        if let Ok(shared) = self.shared.try_borrow() {
-            debug.field("shared", &format!("{} pushers", shared.len()));
-        } else {
-            debug.field("shared", &"...");
-        }
-
-        debug.finish()
-    }
-}
-
 /// A shared list of `Box<Push>` used to add `Push` implementors.
 pub struct TeeHelper<T, D> {
-    shared: PushList<T, D>,
+    shared: Rc<RefCell<Vec<Box<dyn Push<Bundle<T, D>>>>>>
 }
 
 impl<T, D> TeeHelper<T, D> {
     /// Adds a new `Push` implementor to the list of recipients shared with a `Stream`.
-    pub fn add_pusher<P: Push<BundleCore<T, D>>+'static>(&self, pusher: P) {
+    pub fn add_pusher<P: Push<Bundle<T, D>>+'static>(&self, pusher: P) {
         self.shared.borrow_mut().push(Box::new(pusher));
     }
 }
@@ -97,21 +73,7 @@ impl<T, D> TeeHelper<T, D> {
 impl<T, D> Clone for TeeHelper<T, D> {
     fn clone(&self) -> Self {
         TeeHelper {
-            shared: self.shared.clone(),
+            shared: self.shared.clone()
         }
-    }
-}
-
-impl<T, D> Debug for TeeHelper<T, D> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut debug = f.debug_struct("TeeHelper");
-
-        if let Ok(shared) = self.shared.try_borrow() {
-            debug.field("shared", &format!("{} pushers", shared.len()));
-        } else {
-            debug.field("shared", &"...");
-        }
-
-        debug.finish()
     }
 }

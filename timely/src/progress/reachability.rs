@@ -27,7 +27,7 @@
 //! builder.add_edge(Source::new(2, 0), Target::new(0, 0));
 //!
 //! // Construct a reachability tracker.
-//! let (mut tracker, _) = builder.build(None);
+//! let (mut tracker, _) = builder.build();
 //!
 //! // Introduce a pointstamp at the output of the first node.
 //! tracker.update_source(Source::new(0, 0), 17, 1);
@@ -74,7 +74,6 @@
 
 use std::collections::{BinaryHeap, HashMap, VecDeque};
 use std::cmp::Reverse;
-use std::println;
 
 use crate::progress::Timestamp;
 use crate::progress::{Source, Target};
@@ -124,7 +123,7 @@ use crate::progress::timestamp::PathSummary;
 /// builder.add_edge(Source::new(2, 0), Target::new(0, 0));
 ///
 /// // Summarize reachability information.
-/// let (tracker, _) = builder.build(None);
+/// let (tracker, _) = builder.build();
 /// ```
 #[derive(Clone, Debug)]
 pub struct Builder<T: Timestamp> {
@@ -194,16 +193,14 @@ impl<T: Timestamp> Builder<T> {
     /// This method has the opportunity to perform some error checking that the path summaries
     /// are valid, including references to undefined nodes and ports, as well as self-loops with
     /// default summaries (a serious liveness issue).
-    ///
-    /// The optional logger information is baked into the resulting tracker.
-    pub fn build(self, logger: Option<logging::TrackerLogger>) -> (Tracker<T>, Vec<Vec<Antichain<T::Summary>>>) {
+    pub fn build(&self) -> (Tracker<T>, Vec<Vec<Antichain<T::Summary>>>) {
 
         if !self.is_acyclic() {
             println!("Cycle detected without timestamp increment");
             println!("{:?}", self);
         }
 
-        Tracker::allocate_from(self, logger)
+        Tracker::allocate_from(self)
     }
 
     /// Tests whether the graph a cycle of default path summaries.
@@ -301,7 +298,7 @@ impl<T: Timestamp> Builder<T> {
         // Initially this list contains observed locations with no incoming
         // edges, but as the algorithm develops we add to it any locations
         // that can only be reached by nodes that have been on this list.
-        let mut worklist = Vec::with_capacity(in_degree.len());
+        let mut worklist = Vec::new();
         for (key, val) in in_degree.iter() {
             if *val == 0 {
                 worklist.push(*key);
@@ -341,12 +338,6 @@ impl<T: Timestamp> Builder<T> {
 
         // Acyclic graphs should reduce to empty collections.
         in_degree.is_empty()
-    }
-}
-
-impl<T: Timestamp> Default for Builder<T> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -403,9 +394,6 @@ pub struct Tracker<T:Timestamp> {
     /// always be exactly equal to the sum across all operators of the frontier sizes
     /// of the target and source `pointstamps` member.
     total_counts: i64,
-
-    /// Optionally, a unique logging identifier and logging for tracking events.
-    logger: Option<logging::TrackerLogger>,
 }
 
 /// Target and source information for each operator.
@@ -446,7 +434,6 @@ impl<T: Timestamp> PortInformation<T> {
             output_summaries: Vec::new(),
         }
     }
-
     /// True if updates at this pointstamp uniquely block progress.
     ///
     /// This method returns true if the currently maintained pointstamp
@@ -460,12 +447,6 @@ impl<T: Timestamp> PortInformation<T> {
         let dominated = self.implications.frontier().iter().any(|t| t.less_than(time));
         let redundant = self.implications.count_for(time) > 1;
         !dominated && !redundant
-    }
-}
-
-impl<T: Timestamp> Default for PortInformation<T> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -502,9 +483,7 @@ impl<T:Timestamp> Tracker<T> {
     ///
     /// The result is a pair of tracker, and the summaries from each input port to each
     /// output port.
-    ///
-    /// If the optional logger is provided, it will be used to log various tracker events.
-    pub fn allocate_from(builder: Builder<T>, logger: Option<logging::TrackerLogger>) -> (Self, Vec<Vec<Antichain<T::Summary>>>) {
+    pub fn allocate_from(builder: &Builder<T>) -> (Self, Vec<Vec<Antichain<T::Summary>>>) {
 
         // Allocate buffer space for each input and input port.
         let mut per_operator =
@@ -547,8 +526,8 @@ impl<T:Timestamp> Tracker<T> {
 
         let tracker =
         Tracker {
-            nodes: builder.nodes,
-            edges: builder.edges,
+            nodes: builder.nodes.clone(),
+            edges: builder.edges.clone(),
             per_operator,
             target_changes: ChangeBatch::new(),
             source_changes: ChangeBatch::new(),
@@ -556,7 +535,6 @@ impl<T:Timestamp> Tracker<T> {
             pushed_changes: ChangeBatch::new(),
             output_changes,
             total_counts: 0,
-            logger,
         };
 
         (tracker, builder_summary)
@@ -567,30 +545,6 @@ impl<T:Timestamp> Tracker<T> {
     /// The method drains `self.input_changes` and circulates their implications
     /// until we cease deriving new implications.
     pub fn propagate_all(&mut self) {
-
-        // Step 0: If logging is enabled, construct and log inbound changes.
-        if let Some(logger) = &mut self.logger {
-
-            let target_changes =
-            self.target_changes
-                .iter()
-                .map(|((target, time), diff)| (target.node, target.port, time.clone(), *diff))
-                .collect::<Vec<_>>();
-
-            if !target_changes.is_empty() {
-                logger.log_target_updates(Box::new(target_changes));
-            }
-
-            let source_changes =
-            self.source_changes
-                .iter()
-                .map(|((source, time), diff)| (source.node, source.port, time.clone(), *diff))
-                .collect::<Vec<_>>();
-
-            if !source_changes.is_empty() {
-                logger.log_source_updates(Box::new(source_changes));
-            }
-        }
 
         // Step 1: Drain `self.input_changes` and determine actual frontier changes.
         //
@@ -642,7 +596,6 @@ impl<T:Timestamp> Tracker<T> {
         //       The intent is that that by moving forward in layers through `time`, we
         //       will discover zero-change times when we first visit them, as no further
         //       changes can be made to them once we complete them.
-        println!("Starting propagation! Worklist: {:?}", self.worklist);
         while let Some(Reverse((time, location, mut diff))) = self.worklist.pop() {
 
             // Drain and accumulate all updates that have the same time and location.
@@ -701,8 +654,6 @@ impl<T:Timestamp> Tracker<T> {
                 };
             }
         }
-        println!("Propagation ended");
-
     }
 
     /// Implications of maintained capabilities projected to each output.
@@ -759,7 +710,7 @@ fn summarize_outputs<T: Timestamp>(
         }
     }
 
-    let mut results: HashMap<Location, Vec<Antichain<T::Summary>>> = HashMap::new();
+    let mut results = HashMap::new();
     let mut worklist = VecDeque::<(Location, usize, T::Summary)>::new();
 
     let outputs =
@@ -776,6 +727,7 @@ fn summarize_outputs<T: Timestamp>(
 
     // Loop until we stop discovering novel reachability paths.
     while let Some((location, output, summary)) = worklist.pop_front() {
+
         match location.port {
 
             // This is an output port of an operator, or a scope input.
@@ -787,11 +739,7 @@ fn summarize_outputs<T: Timestamp>(
 
                     // Determine the current path summaries from the input port.
                     let location = Location { node: location.node, port: Port::Target(input_port) };
-                    let antichains = results
-                        .entry(location)
-                        .and_modify(|antichains| antichains.reserve(output))
-                        .or_insert_with(|| Vec::with_capacity(output));
-
+                    let antichains = results.entry(location).or_insert(Vec::new());
                     while antichains.len() <= output { antichains.push(Antichain::new()); }
 
                     // Combine each operator-internal summary to the output with `summary`.
@@ -811,16 +759,12 @@ fn summarize_outputs<T: Timestamp>(
             Port::Target(_port) => {
 
                 // Each target should have (at most) one source.
-                if let Some(&source) = reverse.get(&location) {
-                    let antichains = results
-                        .entry(source)
-                        .and_modify(|antichains| antichains.reserve(output))
-                        .or_insert_with(|| Vec::with_capacity(output));
-
+                if let Some(source) = reverse.get(&location) {
+                    let antichains = results.entry(*source).or_insert(Vec::new());
                     while antichains.len() <= output { antichains.push(Antichain::new()); }
 
                     if antichains[output].insert(summary.clone()) {
-                        worklist.push_back((source, output, summary.clone()));
+                        worklist.push_back((*source, output, summary.clone()));
                     }
                 }
 
@@ -830,118 +774,4 @@ fn summarize_outputs<T: Timestamp>(
     }
 
     results
-}
-
-/// Logging types for reachability tracking events.
-pub mod logging {
-
-    use crate::logging::{Logger, ProgressEventTimestampVec};
-
-    /// A logger with additional identifying information about the tracker.
-    pub struct TrackerLogger {
-        path: Vec<usize>,
-        logger: Logger<TrackerEvent>,
-    }
-
-    impl TrackerLogger {
-        /// Create a new tracker logger from its fields.
-        pub fn new(path: Vec<usize>, logger: Logger<TrackerEvent>) -> Self {
-            Self { path, logger }
-        }
-
-        /// Log source update events with additional identifying information.
-        pub fn log_source_updates(&mut self, updates: Box<dyn ProgressEventTimestampVec>) {
-            self.logger.log({
-                SourceUpdate {
-                    tracker_id: self.path.clone(),
-                    updates,
-                }
-            })
-        }
-        /// Log target update events with additional identifying information.
-        pub fn log_target_updates(&mut self, updates: Box<dyn ProgressEventTimestampVec>) {
-            self.logger.log({
-                TargetUpdate {
-                    tracker_id: self.path.clone(),
-                    updates,
-                }
-            })
-        }
-    }
-
-    /// Events that the tracker may record.
-    pub enum TrackerEvent {
-        /// Updates made at a source of data.
-        SourceUpdate(SourceUpdate),
-        /// Updates made at a target of data.
-        TargetUpdate(TargetUpdate),
-    }
-
-    /// An update made at a source of data.
-    pub struct SourceUpdate {
-        /// An identifier for the tracker.
-        pub tracker_id: Vec<usize>,
-        /// Updates themselves, as `(node, port, time, diff)`.
-        pub updates: Box<dyn ProgressEventTimestampVec>,
-    }
-
-    /// An update made at a target of data.
-    pub struct TargetUpdate {
-        /// An identifier for the tracker.
-        pub tracker_id: Vec<usize>,
-        /// Updates themselves, as `(node, port, time, diff)`.
-        pub updates: Box<dyn ProgressEventTimestampVec>,
-    }
-
-    impl From<SourceUpdate> for TrackerEvent {
-        fn from(v: SourceUpdate) -> TrackerEvent { TrackerEvent::SourceUpdate(v) }
-    }
-
-    impl From<TargetUpdate> for TrackerEvent {
-        fn from(v: TargetUpdate) -> TrackerEvent { TrackerEvent::TargetUpdate(v) }
-    }
-}
-
-// The Drop implementation for `Tracker` makes sure that reachability logging is correct for
-// prematurely dropped dataflows. At the moment, this is only possible through `drop_dataflow`,
-// because in all other cases the tracker stays alive while it has outstanding work, leaving no
-// remaining work for this Drop implementation.
-impl<T: Timestamp> Drop for Tracker<T> {
-    fn drop(&mut self) {
-        let logger = if let Some(logger) = &mut self.logger {
-            logger
-        } else {
-            // No cleanup necessary when there is no logger.
-            return;
-        };
-
-        // Retract pending data that `propagate_all` would normally log.
-        for (index, per_operator) in self.per_operator.iter_mut().enumerate() {
-            let target_changes = per_operator.targets
-                .iter_mut()
-                .enumerate()
-                .flat_map(|(port, target)| {
-                    target.pointstamps
-                        .updates()
-                        .map(move |(time, diff)| (index, port, time.clone(), -diff))
-                })
-                .collect::<Vec<_>>();
-            if !target_changes.is_empty() {
-                logger.log_target_updates(Box::new(target_changes));
-            }
-
-            let source_changes = per_operator.sources
-                .iter_mut()
-                .enumerate()
-                .flat_map(|(port, source)| {
-                    source.pointstamps
-                        .updates()
-                        .map(move |(time, diff)| (index, port, time.clone(), -diff))
-                })
-                .collect::<Vec<_>>();
-            if !source_changes.is_empty() {
-                logger.log_source_updates(Box::new(source_changes));
-            }
-        }
-    }
 }

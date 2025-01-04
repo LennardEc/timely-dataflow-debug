@@ -1,7 +1,5 @@
 //! The root of each single-threaded worker.
 
-
-use std::println;
 use std::rc::Rc;
 use std::cell::{RefCell, RefMut};
 use std::any::Any;
@@ -94,7 +92,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Installs options into a [getopts_dep::Options] struct that correspond
+    /// Installs options into a [`getopts::Options`] struct that correspond
     /// to the parameters in the configuration.
     ///
     /// It is the caller's responsibility to ensure that the installed options
@@ -111,15 +109,16 @@ impl Config {
     /// Instantiates a configuration based upon the parsed options in `matches`.
     ///
     /// The `matches` object must have been constructed from a
-    /// [getopts_dep::Options] which contained at least the options installed by
-    /// [Self::install_options].
+    /// [`getopts::Options`] which contained at least the options installed by
+    /// [`Self::install_options`].
     ///
     /// This method is only available if the `getopts` feature is enabled, which
     /// it is by default.
     #[cfg(feature = "getopts")]
     pub fn from_matches(matches: &getopts_dep::Matches) -> Result<Config, String> {
         let progress_mode = matches
-            .opt_get_default("progress-mode", ProgressMode::Eager)?;
+            .opt_get_default("progress-mode", ProgressMode::Eager)
+            .map_err(|e| e.to_string())?;
         Ok(Config::default().progress_mode(progress_mode))
     }
 
@@ -135,16 +134,6 @@ impl Config {
     /// that uniquely identifies your project, to avoid clashes. For example,
     /// differential dataflow registers a configuration struct under the key
     /// "differential".
-    ///
-    /// # Examples
-    /// ```rust
-    /// let mut config = timely::Config::process(3);
-    /// config.worker.set("example".to_string(), 7u64);
-    /// timely::execute(config, |worker| {
-    ///    use crate::timely::worker::AsWorker;
-    ///    assert_eq!(worker.config().get::<u64>("example"), Some(&7));
-    /// }).unwrap();
-    /// ```
     pub fn set<T>(&mut self, key: String, val: T) -> &mut Self
     where
         T: Send + Sync + 'static,
@@ -156,18 +145,8 @@ impl Config {
     /// Gets the value for configured parameter `key`.
     ///
     /// Returns `None` if `key` has not previously been set with
-    /// [Config::set], or if the specified `T` does not match the `T`
+    /// [`WorkerConfig::set`], or if the specified `T` does not match the `T`
     /// from the call to `set`.
-    ///
-    /// # Examples
-    /// ```rust
-    /// let mut config = timely::Config::process(3);
-    /// config.worker.set("example".to_string(), 7u64);
-    /// timely::execute(config, |worker| {
-    ///    use crate::timely::worker::AsWorker;
-    ///    assert_eq!(worker.config().get::<u64>("example"), Some(&7));
-    /// }).unwrap();
-    /// ```
     pub fn get<T: 'static>(&self, key: &str) -> Option<&T> {
         self.registry.get(key).and_then(|val| val.downcast_ref())
     }
@@ -234,14 +213,14 @@ impl<A: Allocate> AsWorker for Worker<A> {
     fn index(&self) -> usize { self.allocator.borrow().index() }
     fn peers(&self) -> usize { self.allocator.borrow().peers() }
     fn allocate<D: Data>(&mut self, identifier: usize, address: &[usize]) -> (Vec<Box<dyn Push<Message<D>>>>, Box<dyn Pull<Message<D>>>) {
-        if address.is_empty() { panic!("Unacceptable address: Length zero"); }
+        if address.len() == 0 { panic!("Unacceptable address: Length zero"); }
         let mut paths = self.paths.borrow_mut();
         paths.insert(identifier, address.to_vec());
         self.temp_channel_ids.borrow_mut().push(identifier);
         self.allocator.borrow_mut().allocate(identifier)
     }
     fn pipeline<T: 'static>(&mut self, identifier: usize, address: &[usize]) -> (ThreadPusher<Message<T>>, ThreadPuller<Message<T>>) {
-        if address.is_empty() { panic!("Unacceptable address: Length zero"); }
+        if address.len() == 0 { panic!("Unacceptable address: Length zero"); }
         let mut paths = self.paths.borrow_mut();
         paths.insert(identifier, address.to_vec());
         self.temp_channel_ids.borrow_mut().push(identifier);
@@ -267,14 +246,14 @@ impl<A: Allocate> Worker<A> {
         let index = c.index();
         Worker {
             config,
-            timer: now,
+            timer: now.clone(),
             paths:  Default::default(),
             allocator: Rc::new(RefCell::new(c)),
             identifiers:  Default::default(),
             dataflows: Default::default(),
             dataflow_counter:  Default::default(),
-            logging: Rc::new(RefCell::new(crate::logging_core::Registry::new(now, index))),
-            activations: Rc::new(RefCell::new(Activations::new(now))),
+            logging: Rc::new(RefCell::new(crate::logging_core::Registry::new(now.clone(), index))),
+            activations: Rc::new(RefCell::new(Activations::new(now.clone()))),
             active_dataflows: Default::default(),
             temp_channel_ids:  Default::default(),
         }
@@ -368,13 +347,11 @@ impl<A: Allocate> Worker<A> {
             (x, y) => x.or(y),
         };
 
-        if delay != Some(Duration::new(0,0)) {
+        if !self.dataflows.borrow().is_empty() && delay != Some(Duration::new(0,0)) {
 
             // Log parking and flush log.
-            if let Some(l) = self.logging().as_mut() {
-                l.log(crate::logging::ParkEvent::park(delay));
-                l.flush();
-            }
+            self.logging().as_mut().map(|l| l.log(crate::logging::ParkEvent::park(delay)));
+            self.logging.borrow_mut().flush();
 
             self.allocator
                 .borrow()
@@ -410,7 +387,6 @@ impl<A: Allocate> Worker<A> {
         // Clean up, indicate if dataflows remain.
         self.logging.borrow_mut().flush();
         self.allocator.borrow_mut().release();
-
         !self.dataflows.borrow().is_empty()
     }
 
@@ -439,8 +415,8 @@ impl<A: Allocate> Worker<A> {
     ///     worker.step_while(|| probe.less_than(&0));
     /// });
     /// ```
-    pub fn step_while<F: FnMut()->bool>(&mut self, func: F) {
-        self.step_or_park_while(Some(Duration::from_secs(0)), func)
+    pub fn step_while<F: FnMut()->bool>(&mut self, mut func: F) {
+        while func() { self.step(); }
     }
 
     /// Calls `self.step_or_park(duration)` as long as `func` evaluates to true.
@@ -637,21 +613,20 @@ impl<A: Allocate> Worker<A> {
                 subgraph: &subscope,
                 parent: self.clone(),
                 logging: logging.clone(),
-                progress_logging,
+                progress_logging: progress_logging.clone(),
             };
             func(&mut resources, &mut builder)
         };
 
         let mut operator = subscope.into_inner().build(self);
 
-        if let Some(l) = logging.as_mut() {
-            l.log(crate::logging::OperatesEvent {
-                id: identifier,
-                addr: operator.path().to_vec(),
-                name: operator.name().to_string(),
-            });
-            l.flush();
-        }
+        logging.as_mut().map(|l| l.log(crate::logging::OperatesEvent {
+            id: identifier,
+            addr: operator.path().to_vec(),
+            name: operator.name().to_string(),
+        }));
+
+        logging.as_mut().map(|l| l.flush());
 
         operator.get_internal_summary();
         operator.set_external_summary();
@@ -699,11 +674,6 @@ impl<A: Allocate> Worker<A> {
     /// List the current dataflow indices.
     pub fn installed_dataflows(&self) -> Vec<usize> {
         self.dataflows.borrow().keys().cloned().collect()
-    }
-
-    /// True if there is at least one dataflow under management.
-    pub fn has_dataflows(&self) -> bool {
-        !self.dataflows.borrow().is_empty()
     }
 
     // Acquire a new distinct dataflow identifier.

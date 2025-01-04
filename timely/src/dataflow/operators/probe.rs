@@ -5,18 +5,18 @@ use std::cell::RefCell;
 
 use crate::progress::Timestamp;
 use crate::progress::frontier::{AntichainRef, MutableAntichain};
-use crate::dataflow::channels::pushers::CounterCore as PushCounter;
-use crate::dataflow::channels::pushers::buffer::BufferCore as PushBuffer;
+use crate::dataflow::channels::pushers::Counter as PushCounter;
+use crate::dataflow::channels::pushers::buffer::Buffer as PushBuffer;
 use crate::dataflow::channels::pact::Pipeline;
 use crate::dataflow::channels::pullers::Counter as PullCounter;
 use crate::dataflow::operators::generic::builder_raw::OperatorBuilder;
 
 
-use crate::dataflow::{StreamCore, Scope};
-use crate::Container;
+use crate::Data;
+use crate::dataflow::{Stream, Scope};
 
 /// Monitors progress at a `Stream`.
-pub trait Probe<G: Scope, D: Container> {
+pub trait Probe<G: Scope, D: Data> {
     /// Constructs a progress probe which indicates which timestamps have elapsed at the operator.
     ///
     /// # Examples
@@ -76,10 +76,10 @@ pub trait Probe<G: Scope, D: Container> {
     ///     }
     /// }).unwrap();
     /// ```
-    fn probe_with(&self, handle: &mut Handle<G::Timestamp>) -> StreamCore<G, D>;
+    fn probe_with(&self, handle: &mut Handle<G::Timestamp>) -> Stream<G, D>;
 }
 
-impl<G: Scope, D: Container> Probe<G, D> for StreamCore<G, D> {
+impl<G: Scope, D: Data> Probe<G, D> for Stream<G, D> {
     fn probe(&self) -> Handle<G::Timestamp> {
 
         // the frontier is shared state; scope updates, handle reads.
@@ -87,7 +87,7 @@ impl<G: Scope, D: Container> Probe<G, D> for StreamCore<G, D> {
         self.probe_with(&mut handle);
         handle
     }
-    fn probe_with(&self, handle: &mut Handle<G::Timestamp>) -> StreamCore<G, D> {
+    fn probe_with(&self, handle: &mut Handle<G::Timestamp>) -> Stream<G, D> {
 
         let mut builder = OperatorBuilder::new("Probe".to_owned(), self.scope());
         let mut input = PullCounter::new(builder.new_input(self, Pipeline));
@@ -97,7 +97,7 @@ impl<G: Scope, D: Container> Probe<G, D> for StreamCore<G, D> {
         let shared_frontier = handle.frontier.clone();
         let mut started = false;
 
-        let mut vector = Default::default();
+        let mut vector = Vec::new();
 
         builder.build(
             move |progress| {
@@ -120,7 +120,7 @@ impl<G: Scope, D: Container> Probe<G, D> for StreamCore<G, D> {
                         RefOrMut::Mut(reference) => (&reference.time, RefOrMut::Mut(&mut reference.data)),
                     };
                     data.swap(&mut vector);
-                    output.session(time).give_container(&mut vector);
+                    output.session(time).give_vec(&mut vector);
                 }
                 output.cease();
 
@@ -137,7 +137,6 @@ impl<G: Scope, D: Container> Probe<G, D> for StreamCore<G, D> {
 }
 
 /// Reports information about progress at the probe.
-#[derive(Debug)]
 pub struct Handle<T:Timestamp> {
     frontier: Rc<RefCell<MutableAntichain<T>>>
 }
@@ -176,15 +175,6 @@ impl<T: Timestamp> Clone for Handle<T> {
         Handle {
             frontier: self.frontier.clone()
         }
-    }
-}
-
-impl<T> Default for Handle<T>
-where
-    T: Timestamp,
-{
-    fn default() -> Self {
-        Self::new()
     }
 }
 

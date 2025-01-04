@@ -4,35 +4,33 @@ use std::rc::Rc;
 use std::cell::RefCell;
 use std::default::Default;
 
+use crate::Data;
+
 use crate::progress::{ChangeBatch, Timestamp};
 use crate::progress::operate::SharedProgress;
 use crate::progress::frontier::{Antichain, MutableAntichain};
 
-use crate::Container;
-use crate::dataflow::{Scope, StreamCore};
-use crate::dataflow::channels::pushers::TeeCore;
-use crate::dataflow::channels::pushers::CounterCore as PushCounter;
-use crate::dataflow::channels::pushers::buffer::BufferCore as PushBuffer;
-use crate::dataflow::channels::pact::ParallelizationContractCore;
+use crate::dataflow::{Stream, Scope};
+use crate::dataflow::channels::pushers::Tee;
+use crate::dataflow::channels::pushers::Counter as PushCounter;
+use crate::dataflow::channels::pushers::buffer::Buffer as PushBuffer;
+use crate::dataflow::channels::pact::ParallelizationContract;
 use crate::dataflow::channels::pullers::Counter as PullCounter;
 use crate::dataflow::operators::capability::Capability;
-use crate::dataflow::operators::generic::handles::{InputHandleCore, new_input_handle, OutputWrapper};
+use crate::dataflow::operators::capability::mint as mint_capability;
+use crate::dataflow::operators::generic::handles::{InputHandle, new_input_handle, OutputWrapper};
 use crate::dataflow::operators::generic::operator_info::OperatorInfo;
-use crate::dataflow::operators::generic::builder_raw::OperatorShape;
 
 use crate::logging::TimelyLogger as Logger;
 
 use super::builder_raw::OperatorBuilder as OperatorBuilderRaw;
 
 /// Builds operators with generic shape.
-#[derive(Debug)]
 pub struct OperatorBuilder<G: Scope> {
     builder: OperatorBuilderRaw<G>,
     frontier: Vec<MutableAntichain<G::Timestamp>>,
     consumed: Vec<Rc<RefCell<ChangeBatch<G::Timestamp>>>>,
     internal: Rc<RefCell<Vec<Rc<RefCell<ChangeBatch<G::Timestamp>>>>>>,
-    /// For each input, a shared list of summaries to each output.
-    summaries: Vec<Rc<RefCell<Vec<Antichain<<G::Timestamp as Timestamp>::Summary>>>>>,
     produced: Vec<Rc<RefCell<ChangeBatch<G::Timestamp>>>>,
     logging: Option<Logger>,
 }
@@ -47,7 +45,6 @@ impl<G: Scope> OperatorBuilder<G> {
             frontier: Vec::new(),
             consumed: Vec::new(),
             internal: Rc::new(RefCell::new(Vec::new())),
-            summaries: Vec::new(),
             produced: Vec::new(),
             logging,
         }
@@ -59,9 +56,9 @@ impl<G: Scope> OperatorBuilder<G> {
     }
 
     /// Adds a new input to a generic operator builder, returning the `Pull` implementor to use.
-    pub fn new_input<D: Container, P>(&mut self, stream: &StreamCore<G, D>, pact: P) -> InputHandleCore<G::Timestamp, D, P::Puller>
+    pub fn new_input<D: Data, P>(&mut self, stream: &Stream<G, D>, pact: P) -> InputHandle<G::Timestamp, D, P::Puller>
     where
-        P: ParallelizationContractCore<G::Timestamp, D> {
+        P: ParallelizationContract<G::Timestamp, D> {
 
         let connection = vec![Antichain::from_elem(Default::default()); self.builder.shape().outputs()];
         self.new_input_connection(stream, pact, connection)
@@ -75,24 +72,21 @@ impl<G: Scope> OperatorBuilder<G> {
     ///
     /// Commonly the connections are either the unit summary, indicating the same timestamp might be produced as output, or an empty
     /// antichain indicating that there is no connection from the input to the output.
-    pub fn new_input_connection<D: Container, P>(&mut self, stream: &StreamCore<G, D>, pact: P, connection: Vec<Antichain<<G::Timestamp as Timestamp>::Summary>>) -> InputHandleCore<G::Timestamp, D, P::Puller>
+    pub fn new_input_connection<D: Data, P>(&mut self, stream: &Stream<G, D>, pact: P, connection: Vec<Antichain<<G::Timestamp as Timestamp>::Summary>>) -> InputHandle<G::Timestamp, D, P::Puller>
         where
-            P: ParallelizationContractCore<G::Timestamp, D> {
+            P: ParallelizationContract<G::Timestamp, D> {
 
-        let puller = self.builder.new_input_connection(stream, pact, connection.clone());
+        let puller = self.builder.new_input_connection(stream, pact, connection);
 
         let input = PullCounter::new(puller);
         self.frontier.push(MutableAntichain::new());
         self.consumed.push(input.consumed().clone());
 
-        let shared_summary = Rc::new(RefCell::new(connection));
-        self.summaries.push(shared_summary.clone());
-
-        new_input_handle(input, self.internal.clone(), shared_summary, self.logging.clone())
+        new_input_handle(input, self.internal.clone(), self.logging.clone())
     }
 
     /// Adds a new output to a generic operator builder, returning the `Push` implementor to use.
-    pub fn new_output<D: Container>(&mut self) -> (OutputWrapper<G::Timestamp, D, TeeCore<G::Timestamp, D>>, StreamCore<G, D>) {
+    pub fn new_output<D: Data>(&mut self) -> (OutputWrapper<G::Timestamp, D, Tee<G::Timestamp, D>>, Stream<G, D>) {
         let connection = vec![Antichain::from_elem(Default::default()); self.builder.shape().inputs()];
         self.new_output_connection(connection)
     }
@@ -105,19 +99,15 @@ impl<G: Scope> OperatorBuilder<G> {
     ///
     /// Commonly the connections are either the unit summary, indicating the same timestamp might be produced as output, or an empty
     /// antichain indicating that there is no connection from the input to the output.
-    pub fn new_output_connection<D: Container>(&mut self, connection: Vec<Antichain<<G::Timestamp as Timestamp>::Summary>>) -> (OutputWrapper<G::Timestamp, D, TeeCore<G::Timestamp, D>>, StreamCore<G, D>) {
+    pub fn new_output_connection<D: Data>(&mut self, connection: Vec<Antichain<<G::Timestamp as Timestamp>::Summary>>) -> (OutputWrapper<G::Timestamp, D, Tee<G::Timestamp, D>>, Stream<G, D>) {
 
-        let (tee, stream) = self.builder.new_output_connection(connection.clone());
+        let (tee, stream) = self.builder.new_output_connection(connection);
 
         let internal = Rc::new(RefCell::new(ChangeBatch::new()));
         self.internal.borrow_mut().push(internal.clone());
 
         let mut buffer = PushBuffer::new(PushCounter::new(tee));
         self.produced.push(buffer.inner().produced().clone());
-
-        for (summary, connection) in self.summaries.iter().zip(connection.into_iter()) {
-            summary.borrow_mut().push(connection.clone());
-        }
 
         (OutputWrapper::new(buffer, internal), stream)
     }
@@ -146,11 +136,12 @@ impl<G: Scope> OperatorBuilder<G> {
         L: FnMut(&[MutableAntichain<G::Timestamp>])->bool+'static
     {
         // create capabilities, discard references to their creation.
-        let mut capabilities = Vec::with_capacity(self.internal.borrow().len());
-        for batch in self.internal.borrow().iter() {
-            capabilities.push(Capability::new(G::Timestamp::minimum(), batch.clone()));
+        let mut capabilities = Vec::new();
+        for output_index in 0  .. self.internal.borrow().len() {
+            let borrow = &self.internal.borrow()[output_index];
+            capabilities.push(mint_capability(G::Timestamp::minimum(), borrow.clone()));
             // Discard evidence of creation, as we are assumed to start with one.
-            batch.borrow_mut().clear();
+            borrow.borrow_mut().clear();
         }
 
         let mut logic = constructor(capabilities);
@@ -164,16 +155,16 @@ impl<G: Scope> OperatorBuilder<G> {
         move |progress: &mut SharedProgress<G::Timestamp>| {
 
             // drain frontier changes
-            for (progress, frontier) in progress.frontiers.iter_mut().zip(self_frontier.iter_mut()) {
-                frontier.update_iter(progress.drain());
+            for index in 0 .. progress.frontiers.len() {
+                self_frontier[index].update_iter(progress.frontiers[index].drain());
             }
 
             // invoke supplied logic
             let result = logic(&self_frontier[..]);
 
             // move batches of consumed changes.
-            for (progress, consumed) in progress.consumeds.iter_mut().zip(self_consumed.iter()) {
-                consumed.borrow_mut().drain_into(progress);
+            for index in 0 .. progress.consumeds.len() {
+                self_consumed[index].borrow_mut().drain_into(&mut progress.consumeds[index]);
             }
 
             // move batches of internal changes.
@@ -184,8 +175,8 @@ impl<G: Scope> OperatorBuilder<G> {
             }
 
             // move batches of produced changes.
-            for (progress, produced) in progress.produceds.iter_mut().zip(self_produced.iter()) {
-                produced.borrow_mut().drain_into(progress);
+            for index in 0 .. progress.produceds.len() {
+                self_produced[index].borrow_mut().drain_into(&mut progress.produceds[index]);
             }
 
             result
@@ -202,11 +193,6 @@ impl<G: Scope> OperatorBuilder<G> {
     /// The operator's worker-unique identifier.
     pub fn global(&self) -> usize {
         self.builder.global()
-    }
-
-    /// Return a reference to the operator's shape
-    pub fn shape(&self) -> &OperatorShape {
-        self.builder.shape()
     }
 
     /// Creates operator info for the operator.
@@ -233,8 +219,8 @@ mod tests {
             let mut builder = OperatorBuilder::new("Failure".to_owned(), scope.clone());
 
             // let mut input = builder.new_input(stream, Pipeline);
-            let (mut output1, _stream1) = builder.new_output::<Vec<()>>();
-            let (mut output2, _stream2) = builder.new_output::<Vec<()>>();
+            let (mut output1, _stream1) = builder.new_output::<()>();
+            let (mut output2, _stream2) = builder.new_output::<()>();
 
             builder.build(move |capabilities| {
                 move |_frontiers| {
@@ -263,8 +249,8 @@ mod tests {
             let mut builder = OperatorBuilder::new("Failure".to_owned(), scope.clone());
 
             // let mut input = builder.new_input(stream, Pipeline);
-            let (mut output1, _stream1) = builder.new_output::<Vec<()>>();
-            let (mut output2, _stream2) = builder.new_output::<Vec<()>>();
+            let (mut output1, _stream1) = builder.new_output::<()>();
+            let (mut output2, _stream2) = builder.new_output::<()>();
 
             builder.build(move |mut capabilities| {
                 move |_frontiers| {

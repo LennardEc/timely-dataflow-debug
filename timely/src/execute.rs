@@ -14,7 +14,7 @@ pub struct Config {
 }
 
 impl Config {
-    /// Installs options into a [getopts_dep::Options] struct that correspond
+    /// Installs options into a [`getopts::Options`] struct that correspond
     /// to the parameters in the configuration.
     ///
     /// It is the caller's responsibility to ensure that the installed options
@@ -32,8 +32,8 @@ impl Config {
     /// Instantiates a configuration based upon the parsed options in `matches`.
     ///
     /// The `matches` object must have been constructed from a
-    /// [getopts_dep::Options] which contained at least the options installed by
-    /// [Self::install_options].
+    /// [`getopts::Options`] which contained at least the options installed by
+    /// [`Self::install_options`].
     ///
     /// This method is only available if the `getopts` feature is enabled, which
     /// it is by default.
@@ -155,9 +155,7 @@ where
     let alloc = crate::communication::allocator::thread::Thread::new();
     let mut worker = crate::worker::Worker::new(WorkerConfig::default(), alloc);
     let result = func(&mut worker);
-    while worker.has_dataflows() {
-        worker.step_or_park(None);
-    }
+    while worker.step_or_park(None) { }
     result
 }
 
@@ -235,12 +233,12 @@ where
 
                 use ::std::net::TcpStream;
                 use crate::logging::BatchLogger;
-                use crate::dataflow::operators::capture::EventWriterCore;
+                use crate::dataflow::operators::capture::EventWriter;
 
                 eprintln!("enabled COMM logging to {}", addr);
 
                 if let Ok(stream) = TcpStream::connect(&addr) {
-                    let writer = EventWriterCore::new(stream);
+                    let writer = EventWriter::new(stream);
                     let mut logger = BatchLogger::new(writer);
                     result = Some(crate::logging_core::Logger::new(
                         ::std::time::Instant::now(),
@@ -259,20 +257,19 @@ where
 
     let (allocators, other) = config.communication.try_build()?;
 
-    let worker_config = config.worker;
     initialize_from(allocators, other, move |allocator| {
 
-        let mut worker = Worker::new(worker_config.clone(), allocator);
+        let mut worker = Worker::new(WorkerConfig::default(), allocator);
 
         // If an environment variable is set, use it as the default timely logging.
         if let Ok(addr) = ::std::env::var("TIMELY_WORKER_LOG_ADDR") {
 
             use ::std::net::TcpStream;
             use crate::logging::{BatchLogger, TimelyEvent};
-            use crate::dataflow::operators::capture::EventWriterCore;
+            use crate::dataflow::operators::capture::EventWriter;
 
             if let Ok(stream) = TcpStream::connect(&addr) {
-                let writer = EventWriterCore::new(stream);
+                let writer = EventWriter::new(stream);
                 let mut logger = BatchLogger::new(writer);
                 worker.log_register()
                     .insert::<TimelyEvent,_>("timely", move |time, data|
@@ -285,9 +282,7 @@ where
         }
 
         let result = func(&mut worker);
-        while worker.has_dataflows() {
-            worker.step_or_park(None);
-        }
+        while worker.step_or_park(None) { }
         result
     })
 }
@@ -386,9 +381,7 @@ where
     initialize_from(builders, others, move |allocator| {
         let mut worker = Worker::new(worker_config.clone(), allocator);
         let result = func(&mut worker);
-        while worker.has_dataflows() {
-            worker.step_or_park(None);
-        }
+        while worker.step_or_park(None) { }
         result
     })
 }

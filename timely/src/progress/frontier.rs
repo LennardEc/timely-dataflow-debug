@@ -1,7 +1,7 @@
 //! Tracks minimal sets of mutually incomparable elements of a partial order.
 
 use crate::progress::ChangeBatch;
-use crate::order::{PartialOrder, TotalOrder};
+use crate::order::PartialOrder;
 
 /// A set of mutually incomparable elements.
 ///
@@ -13,7 +13,7 @@ use crate::order::{PartialOrder, TotalOrder};
 /// Two antichains are equal if the contain the same set of elements, even if in different orders.
 /// This can make equality testing quadratic, though linear in the common case that the sequences
 /// are identical.
-#[derive(Debug, Default, Abomonation, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Abomonation, Serialize, Deserialize)]
 pub struct Antichain<T> {
     elements: Vec<T>
 }
@@ -41,11 +41,6 @@ impl<T: PartialOrder> Antichain<T> {
         else {
             false
         }
-    }
-
-    /// Reserves capacity for at least additional more elements to be inserted in the given `Antichain`
-    pub fn reserve(&mut self, additional: usize) {
-        self.elements.reserve(additional);
     }
 
     /// Performs a sequence of insertion and return true iff any insertion does.
@@ -116,17 +111,6 @@ impl<T: PartialOrder> Antichain<T> {
     }
 }
 
-impl<T: PartialOrder> std::iter::FromIterator<T> for Antichain<T> {
-    fn from_iter<I>(iterator: I) -> Self
-    where
-        I: IntoIterator<Item=T>
-    {
-        let mut result = Self::new();
-        result.extend(iterator);
-        result
-    }
-}
-
 impl<T> Antichain<T> {
 
     /// Creates a new empty `Antichain`.
@@ -139,21 +123,6 @@ impl<T> Antichain<T> {
     /// let mut frontier = Antichain::<u32>::new();
     ///```
     pub fn new() -> Antichain<T> { Antichain { elements: Vec::new() } }
-
-    /// Creates a new empty `Antichain` with space for `capacity` elements.
-    ///
-    /// # Examples
-    ///
-    ///```
-    /// use timely::progress::frontier::Antichain;
-    ///
-    /// let mut frontier = Antichain::<u32>::with_capacity(10);
-    ///```
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            elements: Vec::with_capacity(capacity),
-        }
-    }
 
     /// Creates a new singleton `Antichain`.
     ///
@@ -184,10 +153,6 @@ impl<T> Antichain<T> {
 
     /// Reveals the elements in the antichain.
     ///
-    /// This method is redundant with `<Antichain<T> as Deref>`, but the method
-    /// is in such broad use that we probably don't want to deprecate it without
-    /// some time to fix all things.
-    ///
     /// # Examples
     ///
     ///```
@@ -196,7 +161,7 @@ impl<T> Antichain<T> {
     /// let mut frontier = Antichain::from_elem(2);
     /// assert_eq!(frontier.elements(), &[2]);
     ///```
-    #[inline] pub fn elements(&self) -> &[T] { &self[..] }
+    #[inline] pub fn elements(&self) -> &[T] { &self.elements[..] }
 
     /// Reveals the elements in the antichain.
     ///
@@ -208,7 +173,7 @@ impl<T> Antichain<T> {
     /// let mut frontier = Antichain::from_elem(2);
     /// assert_eq!(&*frontier.borrow(), &[2]);
     ///```
-    #[inline] pub fn borrow(&self) -> AntichainRef<T> { AntichainRef::new(&self.elements) }}
+    #[inline] pub fn borrow(&self) -> AntichainRef<T> { AntichainRef::new(&self.elements[..]) }}
 
 impl<T: PartialEq> PartialEq for Antichain<T> {
     fn eq(&self, other: &Self) -> bool {
@@ -229,67 +194,12 @@ impl<T: PartialOrder> PartialOrder for Antichain<T> {
     }
 }
 
-impl<T: Clone> Clone for Antichain<T> {
-    fn clone(&self) -> Self {
-        Antichain { elements: self.elements.clone() }
-    }
-    fn clone_from(&mut self, source: &Self) {
-        self.elements.clone_from(&source.elements)
-    }
-}
-
-impl<T: TotalOrder> TotalOrder for Antichain<T> { }
-
-impl<T: TotalOrder> Antichain<T> {
-    /// Convert to the at most one element the antichain contains.
-    pub fn into_option(mut self) -> Option<T> {
-        debug_assert!(self.len() <= 1);
-        self.elements.pop()
-    }
-    /// Return a reference to the at most one element the antichain contains.
-    pub fn as_option(&self) -> Option<&T> {
-        debug_assert!(self.len() <= 1);
-        self.elements.last()
-    }
-}
-
-impl<T: Ord+std::hash::Hash> std::hash::Hash for Antichain<T> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        let mut temp = self.elements.iter().collect::<Vec<_>>();
-        temp.sort();
-        for element in temp {
-            element.hash(state);
-        }
-    }
-}
-
 impl<T: PartialOrder> From<Vec<T>> for Antichain<T> {
     fn from(vec: Vec<T>) -> Self {
         // TODO: We could reuse `vec` with some care.
         let mut temp = Antichain::new();
         for elem in vec.into_iter() { temp.insert(elem); }
         temp
-    }
-}
-
-impl<T> Into<Vec<T>> for Antichain<T> {
-    fn into(self) -> Vec<T> {
-        self.elements
-    }
-}
-
-impl<T> ::std::ops::Deref for Antichain<T> {
-    type Target = [T];
-    fn deref(&self) -> &Self::Target {
-        &self.elements
-    }
-}
-
-impl<T> ::std::iter::IntoIterator for Antichain<T> {
-    type Item = T;
-    type IntoIter = ::std::vec::IntoIter<T>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.elements.into_iter()
     }
 }
 
@@ -308,14 +218,19 @@ impl<T> ::std::iter::IntoIterator for Antichain<T> {
 /// The `MutableAntichain` implementation is done with the intent that updates to it are done in batches,
 /// and it is acceptable to rebuild the frontier from scratch when a batch of updates change it. This means
 /// that it can be expensive to maintain a large number of counts and change few elements near the frontier.
+///
+/// There is an `update_dirty` method for single updates that leave the `MutableAntichain` in a dirty state,
+/// but I strongly recommend against using them unless you must (on part of timely progress tracking seems
+/// to be greatly simplified by access to this)
 #[derive(Clone, Debug, Abomonation, Serialize, Deserialize)]
-pub struct MutableAntichain<T> {
-    updates: ChangeBatch<T>,
+pub struct MutableAntichain<T: PartialOrder+Ord> {
+    dirty: usize,
+    updates: Vec<(T, i64)>,
     frontier: Vec<T>,
     changes: ChangeBatch<T>,
 }
 
-impl<T> MutableAntichain<T> {
+impl<T: PartialOrder+Ord+Clone> MutableAntichain<T> {
     /// Creates a new empty `MutableAntichain`.
     ///
     /// # Examples
@@ -329,7 +244,8 @@ impl<T> MutableAntichain<T> {
     #[inline]
     pub fn new() -> MutableAntichain<T> {
         MutableAntichain {
-            updates: ChangeBatch::new(),
+            dirty: 0,
+            updates: Vec::new(),
             frontier:  Vec::new(),
             changes: ChangeBatch::new(),
         }
@@ -348,9 +264,16 @@ impl<T> MutableAntichain<T> {
     ///```
     #[inline]
     pub fn clear(&mut self) {
+        self.dirty = 0;
         self.updates.clear();
         self.frontier.clear();
         self.changes.clear();
+    }
+
+    /// This method deletes the contents. Unlike `clear` it records doing so.
+    pub fn empty(&mut self) {
+        for index in 0 .. self.updates.len() { self.updates[index].1 = 0; }
+        self.dirty = self.updates.len();
     }
 
     /// Reveals the minimal elements with positive count.
@@ -364,7 +287,8 @@ impl<T> MutableAntichain<T> {
     /// assert!(frontier.frontier().len() == 0);
     ///```
     #[inline]
-    pub fn frontier(&self) -> AntichainRef<'_, T> {
+    pub fn frontier(&self) -> AntichainRef<T> {
+        debug_assert_eq!(self.dirty, 0);
         AntichainRef::new(&self.frontier)
     }
 
@@ -379,12 +303,10 @@ impl<T> MutableAntichain<T> {
     /// assert!(frontier.frontier() == AntichainRef::new(&[0u64]));
     ///```
     #[inline]
-    pub fn new_bottom(bottom: T) -> MutableAntichain<T> 
-    where
-        T: Ord+Clone,
-    {
+    pub fn new_bottom(bottom: T) -> MutableAntichain<T> {
         MutableAntichain {
-            updates: ChangeBatch::new_from(bottom.clone(), 1),
+            dirty: 0,
+            updates: vec![(bottom.clone(), 1)],
             frontier: vec![bottom],
             changes: ChangeBatch::new(),
         }
@@ -402,6 +324,7 @@ impl<T> MutableAntichain<T> {
     ///```
     #[inline]
     pub fn is_empty(&self) -> bool {
+        debug_assert_eq!(self.dirty, 0);
         self.frontier.is_empty()
     }
 
@@ -418,10 +341,8 @@ impl<T> MutableAntichain<T> {
     /// assert!(frontier.less_than(&2));
     ///```
     #[inline]
-    pub fn less_than(&self, time: &T) -> bool
-    where
-        T: PartialOrder,
-    {
+    pub fn less_than(&self, time: &T) -> bool {
+        debug_assert_eq!(self.dirty, 0);
         self.frontier().less_than(time)
     }
 
@@ -438,11 +359,21 @@ impl<T> MutableAntichain<T> {
     /// assert!(frontier.less_equal(&2));
     ///```
     #[inline]
-    pub fn less_equal(&self, time: &T) -> bool
-    where
-        T: PartialOrder,
-    {
+    pub fn less_equal(&self, time: &T) -> bool {
+        debug_assert_eq!(self.dirty, 0);
         self.frontier().less_equal(time)
+    }
+
+    /// Allows a single-element push, but dirties the antichain and prevents inspection until cleaned.
+    ///
+    /// At the moment inspection is prevented via panic, so best be careful (this should probably be fixed).
+    /// It is *very* important if you want to use this method that very soon afterwards you call something
+    /// akin to `update_iter`, perhaps with a `None` argument if you have no more data, as this method will
+    /// tidy up the internal representation.
+    #[inline]
+    pub fn update_dirty(&mut self, time: T, delta: i64) {
+        self.updates.push((time, delta));
+        self.dirty += 1;
     }
 
     /// Applies updates to the antichain and enumerates any changes.
@@ -462,27 +393,32 @@ impl<T> MutableAntichain<T> {
     /// assert!(changes == vec![(1, -1), (2, 1)]);
     ///```
     #[inline]
-    pub fn update_iter<I>(&mut self, updates: I) -> ::std::vec::Drain<'_, (T, i64)>
+    pub fn update_iter<'a, I>(&'a mut self, updates: I) -> ::std::vec::Drain<'a, (T, i64)>
     where
-        T: Clone + PartialOrder + Ord,
         I: IntoIterator<Item = (T, i64)>,
     {
-        let updates = updates.into_iter();
+        for (time, delta) in updates {
+            self.updates.push((time, delta));
+            self.dirty += 1;
+        }
 
         // track whether a rebuild is needed.
         let mut rebuild_required = false;
-        for (time, delta) in updates {
 
-            // If we do not yet require a rebuild, test whether we might require one
-            // and set the flag in that case.
-            if !rebuild_required {
-                let beyond_frontier = self.frontier.iter().any(|f| f.less_than(&time));
-                let before_frontier = !self.frontier.iter().any(|f| f.less_equal(&time));
-                rebuild_required = !(beyond_frontier || (delta < 0 && before_frontier));
-            }
+        // determine if recently pushed data requires rebuilding the frontier.
+        // note: this may be required even with an empty iterator, due to dirty data in self.updates.
+        while self.dirty > 0 && !rebuild_required {
 
-            self.updates.update(time, delta);
+            let time = &self.updates[self.updates.len() - self.dirty].0;
+            let delta = self.updates[self.updates.len() - self.dirty].1;
+
+            let beyond_frontier = self.frontier.iter().any(|f| f.less_than(time));
+            let before_frontier = !self.frontier.iter().any(|f| f.less_equal(time));
+            rebuild_required = rebuild_required || !(beyond_frontier || (delta < 0 && before_frontier));
+
+            self.dirty -= 1;
         }
+        self.dirty = 0;
 
         if rebuild_required {
             self.rebuild()
@@ -490,15 +426,25 @@ impl<T> MutableAntichain<T> {
         self.changes.drain()
     }
 
-    /// Rebuilds `self.frontier` from `self.updates`.
+    /// Sorts and consolidates `self.updates` and applies `action` to any frontier changes.
     ///
     /// This method is meant to be used for bulk updates to the frontier, and does more work than one might do
     /// for single updates, but is meant to be an efficient way to process multiple updates together. This is
     /// especially true when we want to apply very large numbers of updates.
-    fn rebuild(&mut self)
-    where
-        T: Clone + PartialOrder + Ord,
-    {
+    fn rebuild(&mut self) {
+
+        // sort and consolidate updates; retain non-zero accumulations.
+        if !self.updates.is_empty() {
+            self.updates.sort_by(|x,y| x.0.cmp(&y.0));
+            for i in 0 .. self.updates.len() - 1 {
+                if self.updates[i].0 == self.updates[i+1].0 {
+                    self.updates[i+1].1 += self.updates[i].1;
+                    self.updates[i].1 = 0;
+                }
+            }
+            self.updates.retain(|x| x.1 != 0);
+        }
+
         for time in self.frontier.drain(..) {
             self.changes.update(time, -1);
         }
@@ -517,33 +463,12 @@ impl<T> MutableAntichain<T> {
     }
 
     /// Reports the count for a queried time.
-    pub fn count_for(&self, query_time: &T) -> i64
-    where
-        T: Ord,
-    {
+    pub fn count_for(&self, query_time: &T) -> i64 {
         self.updates
-            .unstable_internal_updates()
             .iter()
             .filter(|td| td.0.eq(query_time))
             .map(|td| td.1)
             .sum()
-    }
-
-    /// Reports the updates that form the frontier. Returns an iterator of timestamps and their frequency.
-    ///
-    /// Rebuilds the internal representation before revealing times and frequencies.
-    pub fn updates(&mut self) -> impl Iterator<Item=&(T, i64)>
-    where
-        T: Clone + PartialOrder + Ord,
-    {
-        self.rebuild();
-        self.updates.iter()
-    }
-}
-
-impl<T> Default for MutableAntichain<T> {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -553,7 +478,7 @@ pub trait MutableAntichainFilter<T: PartialOrder+Ord+Clone> {
     ///
     /// # Examples
     ///
-    /// ```
+    ///```
     /// use timely::progress::frontier::{MutableAntichain, MutableAntichainFilter};
     ///
     /// let mut frontier = MutableAntichain::new_bottom(1u64);
@@ -563,42 +488,13 @@ pub trait MutableAntichainFilter<T: PartialOrder+Ord+Clone> {
     ///     .collect::<Vec<_>>();
     ///
     /// assert!(changes == vec![(1, -1), (2, 1)]);
-    /// ```
+    ///```
     fn filter_through(self, antichain: &mut MutableAntichain<T>) -> ::std::vec::Drain<(T,i64)>;
 }
 
 impl<T: PartialOrder+Ord+Clone, I: IntoIterator<Item=(T,i64)>> MutableAntichainFilter<T> for I {
     fn filter_through(self, antichain: &mut MutableAntichain<T>) -> ::std::vec::Drain<(T,i64)> {
         antichain.update_iter(self.into_iter())
-    }
-}
-
-impl<T: PartialOrder+Ord+Clone> From<Antichain<T>> for MutableAntichain<T> {
-    fn from(antichain: Antichain<T>) -> Self {
-        let mut result = MutableAntichain::new();
-        result.update_iter(antichain.into_iter().map(|time| (time, 1)));
-        result
-    }
-}
-impl<'a, T: PartialOrder+Ord+Clone> From<AntichainRef<'a, T>> for MutableAntichain<T> {
-    fn from(antichain: AntichainRef<'a, T>) -> Self {
-        let mut result = MutableAntichain::new();
-        result.update_iter(antichain.into_iter().map(|time| (time.clone(), 1)));
-        result
-    }
-}
-
-impl<T> std::iter::FromIterator<(T, i64)> for MutableAntichain<T>
-where
-    T: Clone + PartialOrder + Ord,
-{
-    fn from_iter<I>(iterator: I) -> Self
-    where
-        I: IntoIterator<Item=(T, i64)>,
-    {
-        let mut result = Self::new();
-        result.update_iter(iterator);
-        result
     }
 }
 
@@ -612,11 +508,10 @@ pub struct AntichainRef<'a, T: 'a> {
 impl<'a, T: 'a> Clone for AntichainRef<'a, T> {
     fn clone(&self) -> Self {
         Self {
-            frontier: self.frontier,
+            frontier: self.frontier.clone(),
         }
     }
 }
-
 impl<'a, T: 'a> Copy for AntichainRef<'a, T> { }
 
 impl<'a, T: 'a> AntichainRef<'a, T> {
@@ -703,16 +598,6 @@ impl<'a, T: PartialOrder> PartialOrder for AntichainRef<'a, T> {
     }
 }
 
-impl<'a, T: TotalOrder> TotalOrder for AntichainRef<'a, T> { }
-
-impl<'a, T: TotalOrder> AntichainRef<'a, T> {
-    /// Return a reference to the at most one element the antichain contains.
-    pub fn as_option(&self) -> Option<&T> {
-        debug_assert!(self.len() <= 1);
-        self.frontier.last()
-    }
-}
-
 impl<'a, T> ::std::ops::Deref for AntichainRef<'a, T> {
     type Target = [T];
     fn deref(&self) -> &Self::Target {
@@ -725,58 +610,5 @@ impl<'a, T: 'a> ::std::iter::IntoIterator for &'a AntichainRef<'a, T> {
     type IntoIter = ::std::slice::Iter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashSet;
-
-    use super::*;
-
-    #[derive(PartialEq, Eq, PartialOrd, Ord, Hash)]
-    struct Elem(char, usize);
-
-    impl PartialOrder for Elem {
-        fn less_equal(&self, other: &Self) -> bool {
-            self.0 <= other.0 && self.1 <= other.1
-        }
-    }
-
-    #[test]
-    fn antichain_hash() {
-        let mut hashed = HashSet::new();
-        hashed.insert(Antichain::from(vec![Elem('a', 2), Elem('b', 1)]));
-
-        assert!(hashed.contains(&Antichain::from(vec![Elem('a', 2), Elem('b', 1)])));
-        assert!(hashed.contains(&Antichain::from(vec![Elem('b', 1), Elem('a', 2)])));
-
-        assert!(!hashed.contains(&Antichain::from(vec![Elem('a', 2)])));
-        assert!(!hashed.contains(&Antichain::from(vec![Elem('a', 1)])));
-        assert!(!hashed.contains(&Antichain::from(vec![Elem('b', 2)])));
-        assert!(!hashed.contains(&Antichain::from(vec![Elem('a', 1), Elem('b', 2)])));
-        assert!(!hashed.contains(&Antichain::from(vec![Elem('c', 3)])));
-        assert!(!hashed.contains(&Antichain::from(vec![])));
-    }
-
-    #[test]
-    fn mutable_compaction() {
-        let mut mutable = MutableAntichain::new();
-        mutable.update_iter(Some((7, 1)));
-        mutable.update_iter(Some((7, 1)));
-        mutable.update_iter(Some((7, 1)));
-        mutable.update_iter(Some((7, 1)));
-        mutable.update_iter(Some((7, 1)));
-        mutable.update_iter(Some((7, 1)));
-        mutable.update_iter(Some((8, 1)));
-        mutable.update_iter(Some((8, 1)));
-        mutable.update_iter(Some((8, 1)));
-        mutable.update_iter(Some((8, 1)));
-        mutable.update_iter(Some((8, 1)));
-        for _ in 0 .. 1000 {
-            mutable.update_iter(Some((9, 1)));
-            mutable.update_iter(Some((9, -1)));
-        }
-        assert!(mutable.updates.unstable_internal_updates().len() <= 32);
     }
 }

@@ -24,12 +24,11 @@ pub trait Schedule {
 pub trait Scheduler {
     /// Provides a shared handle to the activation scheduler.
     fn activations(&self) -> Rc<RefCell<Activations>>;
-
     /// Constructs an `Activator` tied to the specified operator address.
     fn activator_for(&self, path: &[usize]) -> Activator {
-        Activator::new(path, self.activations())
+        let activations = self.activations().clone();
+        Activator::new(path, activations)
     }
-
     /// Constructs a `SyncActivator` tied to the specified operator address.
     fn sync_activator_for(&self, path: &[usize]) -> SyncActivator {
         let sync_activations = self.activations().borrow().sync();

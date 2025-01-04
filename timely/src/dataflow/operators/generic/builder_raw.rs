@@ -8,19 +8,19 @@ use std::default::Default;
 use std::rc::Rc;
 use std::cell::RefCell;
 
+use crate::Data;
+
 use crate::scheduling::{Schedule, Activations};
 
 use crate::progress::{Source, Target};
 use crate::progress::{Timestamp, Operate, operate::SharedProgress, Antichain};
 
-use crate::Container;
-use crate::dataflow::{StreamCore, Scope};
-use crate::dataflow::channels::pushers::TeeCore;
-use crate::dataflow::channels::pact::ParallelizationContractCore;
+use crate::dataflow::{Stream, Scope};
+use crate::dataflow::channels::pushers::Tee;
+use crate::dataflow::channels::pact::ParallelizationContract;
 use crate::dataflow::operators::generic::operator_info::OperatorInfo;
 
 /// Contains type-free information about the operator properties.
-#[derive(Debug)]
 pub struct OperatorShape {
     name: String,   // A meaningful name for the operator.
     notify: bool,   // Does the operator require progress notifications.
@@ -53,7 +53,6 @@ impl OperatorShape {
 }
 
 /// Builds operators with generic shape.
-#[derive(Debug)]
 pub struct OperatorBuilder<G: Scope> {
     scope: G,
     index: usize,
@@ -105,17 +104,17 @@ impl<G: Scope> OperatorBuilder<G> {
     }
 
     /// Adds a new input to a generic operator builder, returning the `Pull` implementor to use.
-    pub fn new_input<D: Container, P>(&mut self, stream: &StreamCore<G, D>, pact: P) -> P::Puller
+    pub fn new_input<D: Data, P>(&mut self, stream: &Stream<G, D>, pact: P) -> P::Puller
         where
-            P: ParallelizationContractCore<G::Timestamp, D> {
+            P: ParallelizationContract<G::Timestamp, D> {
         let connection = vec![Antichain::from_elem(Default::default()); self.shape.outputs];
         self.new_input_connection(stream, pact, connection)
     }
 
     /// Adds a new input to a generic operator builder, returning the `Pull` implementor to use.
-    pub fn new_input_connection<D: Container, P>(&mut self, stream: &StreamCore<G, D>, pact: P, connection: Vec<Antichain<<G::Timestamp as Timestamp>::Summary>>) -> P::Puller
+    pub fn new_input_connection<D: Data, P>(&mut self, stream: &Stream<G, D>, pact: P, connection: Vec<Antichain<<G::Timestamp as Timestamp>::Summary>>) -> P::Puller
     where
-        P: ParallelizationContractCore<G::Timestamp, D> {
+        P: ParallelizationContract<G::Timestamp, D> {
 
         let channel_id = self.scope.new_identifier();
         let logging = self.scope.logging();
@@ -131,18 +130,18 @@ impl<G: Scope> OperatorBuilder<G> {
     }
 
     /// Adds a new output to a generic operator builder, returning the `Push` implementor to use.
-    pub fn new_output<D: Container>(&mut self) -> (TeeCore<G::Timestamp, D>, StreamCore<G, D>) {
+    pub fn new_output<D: Data>(&mut self) -> (Tee<G::Timestamp, D>, Stream<G, D>) {
 
         let connection = vec![Antichain::from_elem(Default::default()); self.shape.inputs];
         self.new_output_connection(connection)
     }
 
     /// Adds a new output to a generic operator builder, returning the `Push` implementor to use.
-    pub fn new_output_connection<D: Container>(&mut self, connection: Vec<Antichain<<G::Timestamp as Timestamp>::Summary>>) -> (TeeCore<G::Timestamp, D>, StreamCore<G, D>) {
+    pub fn new_output_connection<D: Data>(&mut self, connection: Vec<Antichain<<G::Timestamp as Timestamp>::Summary>>) -> (Tee<G::Timestamp, D>, Stream<G, D>) {
 
-        let (targets, registrar) = TeeCore::<G::Timestamp,D>::new();
+        let (targets, registrar) = Tee::<G::Timestamp,D>::new();
         let source = Source::new(self.index, self.shape.outputs);
-        let stream = StreamCore::new(source, registrar, self.scope.clone());
+        let stream = Stream::new(source, registrar, self.scope.clone());
 
         self.shape.outputs += 1;
         assert_eq!(self.shape.inputs, connection.len());
@@ -164,7 +163,7 @@ impl<G: Scope> OperatorBuilder<G> {
         let operator = OperatorCore {
             shape: self.shape,
             address: self.address,
-            activations: self.scope.activations(),
+            activations: self.scope.activations().clone(),
             logic,
             shared_progress: Rc::new(RefCell::new(SharedProgress::new(inputs, outputs))),
             summary: self.summary,

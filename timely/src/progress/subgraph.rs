@@ -162,35 +162,18 @@ where
 
         let mut builder = reachability::Builder::new();
 
-        println!("");
-        println!("digraph graphname {{");
         // Child 0 has `inputs` outputs and `outputs` inputs, not yet connected.
         builder.add_node(0, outputs, inputs, vec![vec![Antichain::new(); inputs]; outputs]);
         for (index, child) in self.children.iter().enumerate().skip(1) {
-            let index_string: &str = &child.clone().index.to_string();
-            let mut name_string: String = child.name.to_owned();
-            name_string.push_str("_");
-            name_string.push_str(index_string);
-
-            println!("{:?} [label={:?}] ;", child.index, name_string);
             builder.add_node(index, child.inputs, child.outputs, child.internal_summary.clone());
         }
 
         for (source, target) in self.edge_stash {
-            println!("  {:?} -> {:?} ;", source.node, target.node);
             self.children[source.node].edges[source.port].push(target);
             builder.add_edge(source, target);
         }
-        println!("}}");
-        println!("");
 
-        // The `None` argument is optional logging infrastructure.
-        let path = self.path.clone();
-        let reachability_logging =
-        worker.log_register()
-            .get::<reachability::logging::TrackerEvent>("timely/reachability")
-            .map(|logger| reachability::logging::TrackerLogger::new(path, logger));
-        let (tracker, scope_summary) = builder.build(reachability_logging);
+        let (tracker, scope_summary) = builder.build();
 
         let progcaster = Progcaster::new(worker, &self.path, self.logging.clone(), self.progress_logging.clone());
 
@@ -198,7 +181,7 @@ where
         incomplete[0] = false;
         let incomplete_count = incomplete.len() - 1;
 
-        let activations = worker.activations();
+        let activations = worker.activations().clone();
 
         activations.borrow_mut().activate(&self.path[..]);
 
@@ -211,7 +194,6 @@ where
             incomplete_count,
             activations,
             temp_active: BinaryHeap::new(),
-            maybe_shutdown: Vec::new(),
             children: self.children,
             input_messages: self.input_messages,
             output_capabilities: self.output_capabilities,
@@ -254,7 +236,6 @@ where
     // shared activations (including children).
     activations: Rc<RefCell<Activations>>,
     temp_active: BinaryHeap<Reverse<usize>>,
-    maybe_shutdown: Vec<usize>,
 
     // shared state written to by the datapath, counting records entering this subgraph instance.
     input_messages: Vec<Rc<RefCell<ChangeBatch<TInner>>>>,
@@ -362,20 +343,9 @@ where
             self.incomplete[child_index] = incomplete;
         }
 
-
         if !incomplete {
             // Consider shutting down the child, if neither capabilities nor input frontier.
             let child_state = self.pointstamp_tracker.node_state(child_index);
-            // println!("LOG2: Child targets {:?}", child_state.targets);
-            println!("________");
-            println!("Child name: {:?}", child_index);
-            for c in child_state.sources.iter() {
-                println!("LOG2: capabilities {:?}", c.pointstamps);
-            }
-            for c in child_state.targets.iter() {
-                println!("LOG2: implications {:?}", c.implications);
-            }
-            println!("________");
             let frontiers_empty = child_state.targets.iter().all(|x| x.implications.is_empty());
             let no_capabilities = child_state.sources.iter().all(|x| x.pointstamps.is_empty());
             if frontiers_empty && no_capabilities {
@@ -485,7 +455,6 @@ where
 
         // Drain propagated information into shared progress structure.
         for ((location, time), diff) in self.pointstamp_tracker.pushed().drain() {
-            self.maybe_shutdown.push(location.node);
             // Targets are actionable, sources are not.
             if let crate::progress::Port::Target(port) = location.port {
                 if self.children[location.node].notify {
@@ -499,18 +468,6 @@ where
                     .borrow_mut()
                     .frontiers[port]
                     .update(time, diff);
-            }
-        }
-
-        // Consider scheduling each recipient of progress information to shut down.
-        self.maybe_shutdown.sort();
-        self.maybe_shutdown.dedup();
-        for child_index in self.maybe_shutdown.drain(..) {
-            let child_state = self.pointstamp_tracker.node_state(child_index);
-            let frontiers_empty = child_state.targets.iter().all(|x| x.implications.is_empty());
-            let no_capabilities = child_state.sources.iter().all(|x| x.pointstamps.is_empty());
-            if frontiers_empty && no_capabilities {
-                self.temp_active.push(Reverse(child_index));
             }
         }
 
@@ -567,27 +524,14 @@ where
         assert_eq!(self.children[0].outputs, self.inputs());
         assert_eq!(self.children[0].inputs, self.outputs());
 
-        // Note that we need to have `self.inputs()` elements in the summary
-        // with each element containing `self.outputs()` antichains regardless
-        // of how long `self.scope_summary` is
         let mut internal_summary = vec![vec![Antichain::new(); self.outputs()]; self.inputs()];
-        for (input_idx, input) in self.scope_summary.iter().enumerate() {
-            for (output_idx, output) in input.iter().enumerate() {
-                let antichain = &mut internal_summary[input_idx][output_idx];
-                antichain.reserve(output.elements().len());
-                antichain.extend(output.elements().iter().cloned().map(TInner::summarize));
+        for input in 0 .. self.scope_summary.len() {
+            for output in 0 .. self.scope_summary[input].len() {
+                for path_summary in self.scope_summary[input][output].elements().iter() {
+                    internal_summary[input][output].insert(TInner::summarize(path_summary.clone()));
+                }
             }
         }
-
-        debug_assert_eq!(
-            internal_summary.len(),
-            self.inputs(),
-            "the internal summary should have as many elements as there are inputs",
-        );
-        debug_assert!(
-            internal_summary.iter().all(|summary| summary.len() == self.outputs()),
-            "each element of the internal summary should have as many elements as there are outputs",
-        );
 
         // Each child has expressed initial capabilities (their `shared_progress.internals`).
         // We introduce these into the progress tracker to determine the scope's initial
@@ -671,17 +615,8 @@ impl<T: Timestamp> PerOperatorState<T> {
 
         let (internal_summary, shared_progress) = scope.get_internal_summary();
 
-        assert_eq!(
-            internal_summary.len(),
-            inputs,
-            "operator summary has {} inputs when {} were expected",
-            internal_summary.len(),
-            inputs,
-        );
-        assert!(
-            !internal_summary.iter().any(|x| x.len() != outputs),
-            "operator summary had too few outputs",
-        );
+        assert_eq!(internal_summary.len(), inputs);
+        assert!(!internal_summary.iter().any(|x| x.len() != outputs));
 
         PerOperatorState {
             name:               scope.name().to_owned(),
@@ -748,6 +683,7 @@ impl<T: Timestamp> PerOperatorState<T> {
                 l.log(crate::logging::ShutdownEvent{ id: self.id });
             }
             self.operator = None;
+            self.name = format!("{}(tombstone)", self.name);
         }
     }
 

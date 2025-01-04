@@ -14,7 +14,6 @@ use crate::logging::TimelyLogger as Logger;
 /// Notification requests persist across uses of `Notificator`, and it may help to think of `Notificator`
 /// as a notification *session*. However, idiomatically it seems you mostly want to restrict your usage
 /// to such sessions, which is why this is the main notificator type.
-#[derive(Debug)]
 pub struct Notificator<'a, T: Timestamp> {
     frontiers: &'a [&'a MutableAntichain<T>],
     inner: &'a mut FrontierNotificator<T>,
@@ -57,15 +56,14 @@ impl<'a, T: Timestamp> Notificator<'a, T> {
     ///
     /// timely::example(|scope| {
     ///     (0..10).to_stream(scope)
-    ///            .unary_notify(Pipeline, "example", Some(0), |input, output, notificator| {
+    ///            .unary_notify(Pipeline, "example", Vec::new(), |input, output, notificator| {
     ///                input.for_each(|cap, data| {
     ///                    output.session(&cap).give_vec(&mut data.replace(Vec::new()));
     ///                    let time = cap.time().clone() + 1;
     ///                    notificator.notify_at(cap.delayed(&time));
     ///                });
-    ///                notificator.for_each(|cap, count, _| {
-    ///                    println!("done with time: {:?}, requested {} times", cap.time(), count);
-    ///                    assert!(*cap.time() == 0 && count == 2 || count == 1);
+    ///                notificator.for_each(|cap,_,_| {
+    ///                    println!("done with time: {:?}", cap.time());
     ///                });
     ///            });
     /// });
@@ -100,7 +98,7 @@ impl<'a, T: Timestamp> Iterator for Notificator<'a, T> {
     /// timestamp.
     #[inline]
     fn next(&mut self) -> Option<(Capability<T>, u64)> {
-        self.inner.next_count(self.frontiers)
+        self.inner.next(self.frontiers).map(|x| (x,1))
     }
 }
 
@@ -111,11 +109,11 @@ fn notificator_delivers_notifications_in_topo_order() {
     use crate::progress::ChangeBatch;
     use crate::progress::frontier::MutableAntichain;
     use crate::order::Product;
-    use crate::dataflow::operators::capability::Capability;
+    use crate::dataflow::operators::capability::mint as mint_capability;
 
     let mut frontier = MutableAntichain::new_bottom(Product::new(0, 0));
 
-    let root_capability = Capability::new(Product::new(0,0), Rc::new(RefCell::new(ChangeBatch::new())));
+    let root_capability = mint_capability(Product::new(0,0), Rc::new(RefCell::new(ChangeBatch::new())));
 
     let logging = None;//::logging::new_inactive_logger();
 
@@ -232,7 +230,6 @@ fn notificator_delivers_notifications_in_topo_order() {
 ///     in2.close();
 /// }).unwrap();
 /// ```
-#[derive(Debug)]
 pub struct FrontierNotificator<T: Timestamp> {
     pending: Vec<(Capability<T>, u64)>,
     available: ::std::collections::BinaryHeap<OrderReversed<T>>,
@@ -285,7 +282,7 @@ impl<T: Timestamp> FrontierNotificator<T> {
     /// });
     /// ```
     #[inline]
-    pub fn notify_at(&mut self, cap: Capability<T>) {
+    pub fn notify_at<'a>(&mut self, cap: Capability<T>) {
         self.pending.push((cap,1));
     }
 
@@ -298,7 +295,7 @@ impl<T: Timestamp> FrontierNotificator<T> {
     #[inline]
     pub fn notify_at_frontiered<'a>(&mut self, cap: Capability<T>, frontiers: &'a [&'a MutableAntichain<T>]) {
         if frontiers.iter().all(|f| !f.less_equal(cap.time())) {
-            self.available.push(OrderReversed::new(cap, 1));
+            self.available.push(OrderReversed::new(cap));
         }
         else {
             self.pending.push((cap,1));
@@ -326,7 +323,7 @@ impl<T: Timestamp> FrontierNotificator<T> {
             for i in 0 .. self.pending.len() {
                 if frontiers.iter().all(|f| !f.less_equal(&self.pending[i].0)) {
                     // TODO : This clones a capability, whereas we could move it instead.
-                    self.available.push(OrderReversed::new(self.pending[i].0.clone(), self.pending[i].1));
+                    self.available.push(OrderReversed::new(self.pending[i].0.clone()));
                     self.pending[i].1 = 0;
                 }
             }
@@ -334,34 +331,20 @@ impl<T: Timestamp> FrontierNotificator<T> {
         }
     }
 
-    /// Returns the next available capability with respect to the supplied frontiers, if one exists,
-    /// and the count of how many instances are found.
-    ///
-    /// In the interest of efficiency, this method may yield capabilities in decreasing order, in certain
-    /// circumstances. If you want to iterate through capabilities with an in-order guarantee, either (i)
-    /// use `for_each`, or (ii) call `make_available` first.
-    #[inline]
-    pub fn next_count<'a>(&mut self, frontiers: &'a [&'a MutableAntichain<T>]) -> Option<(Capability<T>, u64)> {
-        if self.available.is_empty() {
-            self.make_available(frontiers);
-        }
-        self.available.pop().map(|front| {
-            let mut count = front.value;
-            while self.available.peek() == Some(&front) {
-                count += self.available.pop().unwrap().value;
-            }
-            (front.element, count)
-        })
-    }
-
     /// Returns the next available capability with respect to the supplied frontiers, if one exists.
     ///
     /// In the interest of efficiency, this method may yield capabilities in decreasing order, in certain
     /// circumstances. If you want to iterate through capabilities with an in-order guarantee, either (i)
-    /// use `for_each`, or (ii) call `make_available` first.
+    /// use `for_each`
     #[inline]
     pub fn next<'a>(&mut self, frontiers: &'a [&'a MutableAntichain<T>]) -> Option<Capability<T>> {
-        self.next_count(frontiers).map(|(cap, _)| cap)
+        if self.available.is_empty() {
+            self.make_available(frontiers);
+        }
+        self.available.pop().map(|front| {
+            while self.available.peek() == Some(&front) { self.available.pop(); }
+            front.element
+        })
     }
 
     /// Repeatedly calls `logic` till exhaustion of the notifications made available by inspecting
@@ -415,19 +398,18 @@ impl<T: Timestamp> FrontierNotificator<T> {
     ///            });
     /// });
     /// ```
-    pub fn pending(&self) -> ::std::slice::Iter<'_, (Capability<T>, u64)> {
+    pub fn pending<'a>(&'a self) -> ::std::slice::Iter<'a, (Capability<T>, u64)> {
         self.pending.iter()
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 struct OrderReversed<T: Timestamp> {
     element: Capability<T>,
-    value: u64,
 }
 
 impl<T: Timestamp> OrderReversed<T> {
-    fn new(element: Capability<T>, value: u64) -> Self { OrderReversed { element, value} }
+    fn new(element: Capability<T>) -> Self { OrderReversed { element } }
 }
 
 impl<T: Timestamp> PartialOrd for OrderReversed<T> {

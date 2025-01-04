@@ -1,13 +1,12 @@
 //! Exchange records between workers.
 
 use crate::ExchangeData;
-use crate::container::PushPartitioned;
-use crate::dataflow::channels::pact::ExchangeCore;
+use crate::dataflow::channels::pact::Exchange as ExchangePact;
+use crate::dataflow::{Stream, Scope};
 use crate::dataflow::operators::generic::operator::Operator;
-use crate::dataflow::{Scope, StreamCore};
 
 /// Exchange records between workers.
-pub trait Exchange<D> {
+pub trait Exchange<T, D: ExchangeData> {
     /// Exchange records between workers.
     ///
     /// The closure supplied should map a reference to a record to a `u64`,
@@ -23,23 +22,18 @@ pub trait Exchange<D> {
     ///            .inspect(|x| println!("seen: {:?}", x));
     /// });
     /// ```
-    fn exchange(&self, route: impl FnMut(&D) -> u64 + 'static) -> Self;
+    fn exchange(&self, route: impl Fn(&D)->u64+'static) -> Self;
 }
 
-impl<G: Scope, C> Exchange<C::Item> for StreamCore<G, C>
-where
-    C: PushPartitioned + ExchangeData,
-    C::Item: ExchangeData,
-{
-    fn exchange(&self, route: impl FnMut(&C::Item) -> u64 + 'static) -> StreamCore<G, C> {
-        let mut container = Default::default();
-        self.unary(ExchangeCore::new(route), "Exchange", |_, _| {
-            move |input, output| {
-                input.for_each(|time, data| {
-                    data.swap(&mut container);
-                    output.session(&time).give_container(&mut container);
-                });
-            }
+// impl<T: Timestamp, G: Scope<Timestamp=T>, D: ExchangeData> Exchange<T, D> for Stream<G, D> {
+impl<G: Scope, D: ExchangeData> Exchange<G::Timestamp, D> for Stream<G, D> {
+    fn exchange(&self, route: impl Fn(&D)->u64+'static) -> Stream<G, D> {
+        let mut vector = Vec::new();
+        self.unary(ExchangePact::new(route), "Exchange", move |_,_| move |input, output| {
+            input.for_each(|time, data| {
+                data.swap(&mut vector);
+                output.session(&time).give_vec(&mut vector);
+            });
         })
     }
 }
