@@ -1,6 +1,5 @@
 //! Intra-thread communication.
 
-use std::println;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::time::Duration;
@@ -37,14 +36,11 @@ impl Allocate for Thread {
         &self.events
     }
     fn await_events(&self, duration: Option<Duration>) {
-        println!("LOG2: Await events: {:?}, duration {:?}", self.events.borrow().len(), duration);
         if self.events.borrow().is_empty() {
             if let Some(duration) = duration {
-                println!("LOG2: >>>>>> Parking with timeout");
                 std::thread::park_timeout(duration);
             }
             else {
-                println!("LOG2: >>>>>>> >>>>> Parking");
                 std::thread::park();
             }
         }
@@ -72,7 +68,7 @@ impl Thread {
         let pusher = Pusher { target: shared.clone() };
         let pusher = CountPusher::new(pusher, identifier, events.clone());
         let puller = Puller { source: shared, current: None };
-        let puller = CountPuller::new(puller, identifier, events);
+        let puller = CountPuller::new(puller, identifier, events.clone());
         (pusher, puller)
     }
 }

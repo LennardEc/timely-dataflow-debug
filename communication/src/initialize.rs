@@ -11,12 +11,10 @@ use std::any::Any;
 
 use crate::allocator::thread::ThreadBuilder;
 use crate::allocator::{AllocateBuilder, Process, Generic, GenericBuilder};
-use crate::allocator::zero_copy::allocator_process::ProcessBuilder;
 use crate::allocator::zero_copy::initialize::initialize_networking;
 
 use crate::logging::{CommunicationSetup, CommunicationEvent};
 use logging_core::Logger;
-use std::fmt::{Debug, Formatter};
 
 
 /// Possible configurations for the communication infrastructure.
@@ -25,8 +23,6 @@ pub enum Config {
     Thread,
     /// Use one process with an indicated number of threads.
     Process(usize),
-    /// Use one process with an indicated number of threads. Use zero-copy exchange channels.
-    ProcessBinary(usize),
     /// Expect multiple processes.
     Cluster {
         /// Number of per-process worker threads
@@ -39,24 +35,6 @@ pub enum Config {
         report: bool,
         /// Closure to create a new logger for a communication thread
         log_fn: Box<dyn Fn(CommunicationSetup) -> Option<Logger<CommunicationEvent, CommunicationSetup>> + Send + Sync>,
-    }
-}
-
-impl Debug for Config {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Config::Thread => write!(f, "Config::Thread()"),
-            Config::Process(n) => write!(f, "Config::Process({})", n),
-            Config::ProcessBinary(n) => write!(f, "Config::ProcessBinary({})", n),
-            Config::Cluster { threads, process, addresses, report, .. } => f
-                .debug_struct("Config::Cluster")
-                .field("threads", threads)
-                .field("process", process)
-                .field("addresses", addresses)
-                .field("report", report)
-                // TODO: Use `.finish_non_exhaustive()` after rust/#67364 lands
-                .finish()
-        }
     }
 }
 
@@ -77,7 +55,6 @@ impl Config {
         opts.optopt("n", "processes", "number of processes", "NUM");
         opts.optopt("h", "hostfile", "text file whose lines are process addresses", "FILE");
         opts.optflag("r", "report", "reports connection progress");
-        opts.optflag("z", "zerocopy", "enable zero-copy for intra-process communication");
     }
 
     /// Instantiates a configuration based upon the parsed options in `matches`.
@@ -94,7 +71,6 @@ impl Config {
         let process = matches.opt_get_default("p", 0_usize).map_err(|e| e.to_string())?;
         let processes = matches.opt_get_default("n", 1_usize).map_err(|e| e.to_string())?;
         let report = matches.opt_present("report");
-        let zerocopy = matches.opt_present("zerocopy");
 
         if processes > 1 {
             let mut addresses = Vec::new();
@@ -123,11 +99,7 @@ impl Config {
                 log_fn: Box::new( | _ | None),
             })
         } else if threads > 1 {
-            if zerocopy {
-                Ok(Config::ProcessBinary(threads))
-            } else {
-                Ok(Config::Process(threads))
-            }
+            Ok(Config::Process(threads))
         } else {
             Ok(Config::Thread)
         }
@@ -155,9 +127,6 @@ impl Config {
             },
             Config::Process(threads) => {
                 Ok((Process::new_vector(threads).into_iter().map(|x| GenericBuilder::Process(x)).collect(), Box::new(())))
-            },
-            Config::ProcessBinary(threads) => {
-                Ok((ProcessBuilder::new_vector(threads).into_iter().map(|x| GenericBuilder::ProcessBinary(x)).collect(), Box::new(())))
             },
             Config::Cluster { threads, process, addresses, report, log_fn } => {
                 match initialize_networking(addresses, process, threads, report, log_fn) {
