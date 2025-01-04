@@ -41,12 +41,14 @@ pub trait CapabilityTrait<T: Timestamp> {
 impl<'a, T: Timestamp, C: CapabilityTrait<T>> CapabilityTrait<T> for &'a C {
     fn time(&self) -> &T { (**self).time() }
     fn valid_for_output(&self, query_buffer: &Rc<RefCell<ChangeBatch<T>>>) -> bool {
+        println!("    1");
         (**self).valid_for_output(query_buffer)
     }
 }
 impl<'a, T: Timestamp, C: CapabilityTrait<T>> CapabilityTrait<T> for &'a mut C {
     fn time(&self) -> &T { (**self).time() }
     fn valid_for_output(&self, query_buffer: &Rc<RefCell<ChangeBatch<T>>>) -> bool {
+        println!("    2");
         (**self).valid_for_output(query_buffer)
     }
 }
@@ -65,6 +67,7 @@ pub struct Capability<T: Timestamp> {
 impl<T: Timestamp> CapabilityTrait<T> for Capability<T> {
     fn time(&self) -> &T { &self.time }
     fn valid_for_output(&self, query_buffer: &Rc<RefCell<ChangeBatch<T>>>) -> bool {
+        println!("    3");
         Rc::ptr_eq(&self.internal, query_buffer)
     }
 }
@@ -176,6 +179,7 @@ impl<'cap, T: Timestamp+'cap> CapabilityTrait<T> for CapabilityRef<'cap, T> {
     fn time(&self) -> &T { self.time }
     fn valid_for_output(&self, query_buffer: &Rc<RefCell<ChangeBatch<T>>>) -> bool {
         // let borrow = ;
+        println!("    4");
         self.internal.borrow().iter().any(|rc| Rc::ptr_eq(rc, query_buffer))
     }
 }
@@ -269,6 +273,7 @@ pub struct ActivateCapability<T: Timestamp> {
 impl<T: Timestamp> CapabilityTrait<T> for ActivateCapability<T> {
     fn time(&self) -> &T { self.capability.time() }
     fn valid_for_output(&self, query_buffer: &Rc<RefCell<ChangeBatch<T>>>) -> bool {
+        println!("    5");
         self.capability.valid_for_output(query_buffer)
     }
 }
