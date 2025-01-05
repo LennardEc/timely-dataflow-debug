@@ -181,6 +181,7 @@ impl<'cap, T: Timestamp+'cap> CapabilityTrait<T> for CapabilityRef<'cap, T> {
     fn valid_for_output(&self, query_buffer: &Rc<RefCell<ChangeBatch<T>>>) -> bool {
         // let borrow = ;
         println!("    4");
+        println!("      internal {:?}  ==  buffer {:?}", self.internal, query_buffer);
         self.internal.borrow().iter().any(|rc| Rc::ptr_eq(rc, query_buffer))
     }
 }
